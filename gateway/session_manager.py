@@ -1,5 +1,17 @@
 
-"""Bounded, thread-safe in-memory session registry for experimental PQVPN."""
+"""Bounded, thread-safe in-memory session registry for experimental PQVPN.
+
+Features:
+- Authorized session registration
+- Directional authenticated AES-256-GCM transport
+- Replay protection through SecureSessionTransport
+- UDP peer binding
+- Session expiry and capacity limits
+- Legacy encrypted PING/PONG
+- Controlled single-client encrypted IPv4 packet delivery
+
+IPv4 delivery does NOT perform TUN injection, routing or NAT.
+"""
 
 import secrets
 import threading
@@ -15,13 +27,21 @@ from modules.networking.transport.session_transport import (
     SERVER_TO_CLIENT,
 )
 
+from modules.networking.transport.ip_payload import (
+    decode_ipv4_payload,
+    validate_tunnel_source,
+)
+
 
 SESSION_LIFETIME = 300
 MAX_SESSIONS = 128
 
+# Sprint 12C.2: isolated single-client test configuration.
+TEST_TUNNEL_CLIENT_IP = "10.77.0.2"
+
 
 class SessionError(Exception):
-    pass
+    """Session authorization, lifecycle or endpoint failure."""
 
 
 @dataclass
@@ -32,12 +52,15 @@ class SessionEntry:
 
 
 class SessionManager:
+    """Thread-safe registry of authorized encrypted sessions."""
 
     def __init__(self):
         self._sessions = {}
         self._lock = threading.RLock()
 
     def _prune(self):
+        """Remove expired sessions. Caller must hold the lock."""
+
         now = time.monotonic()
 
         for sid in list(self._sessions):
@@ -52,7 +75,7 @@ class SessionManager:
         *,
         authorized=False,
     ):
-        """Only trusted code may call after verifying authorization."""
+        """Register an explicitly authorized session."""
 
         if not authorized:
             raise SessionError(
@@ -111,6 +134,8 @@ class SessionManager:
             )
 
     def create(self, keys, role, *, authorized=False):
+        """Create a cryptographically random session identifier."""
+
         if not authorized:
             raise SessionError(
                 "Session activation requires authorization"
@@ -139,6 +164,8 @@ class SessionManager:
             return session_id
 
     def get(self, session_id):
+        """Retrieve a live authorized session."""
+
         with self._lock:
             self._prune()
 
@@ -151,24 +178,29 @@ class SessionManager:
 
             return entry
 
+    def _check_peer(self, entry, address):
+        """Reject packets from a different bound UDP endpoint."""
+
+        if (
+            entry.peer is not None
+            and entry.peer != address
+        ):
+            raise SessionError(
+                "Session endpoint mismatch"
+            )
+
     def process_ping(
         self,
         session_id,
         datagram,
         address,
     ):
-        """Atomically validate, decrypt and respond."""
+        """Authenticate encrypted PING and return encrypted PONG."""
 
         with self._lock:
             entry = self.get(session_id)
 
-            if (
-                entry.peer is not None
-                and entry.peer != address
-            ):
-                raise SessionError(
-                    "Session endpoint mismatch"
-                )
+            self._check_peer(entry, address)
 
             plaintext = entry.transport.decrypt(datagram)
 
@@ -182,11 +214,64 @@ class SessionManager:
 
             return entry.transport.encrypt(b"PONG")
 
+    def process_ipv4(
+        self,
+        session_id,
+        datagram,
+        address,
+        *,
+        assigned_ip=TEST_TUNNEL_CLIENT_IP,
+    ):
+        """Authenticate and validate one IPv4 packet.
+
+        Restricted to exactly one active session for this
+        controlled prototype.
+
+        Returns the decoded IPv4 payload.
+
+        Does not forward or inject the packet.
+        """
+
+        with self._lock:
+            entry = self.get(session_id)
+
+            # Fixed tunnel IP cannot safely be shared by
+            # multiple simultaneous sessions.
+            if len(self._sessions) != 1:
+                raise SessionError(
+                    "IPv4 test mode requires exactly "
+                    "one active session"
+                )
+
+            self._check_peer(entry, address)
+
+            # Authenticated decryption also enforces replay
+            # protection via the existing packet decryptor.
+            plaintext = entry.transport.decrypt(datagram)
+
+            decoded = decode_ipv4_payload(plaintext)
+
+            # Prevent spoofing another tunnel source address.
+            validate_tunnel_source(
+                decoded,
+                assigned_ip,
+            )
+
+            # Bind the peer only after successful validation.
+            if entry.peer is None:
+                entry.peer = address
+
+            return decoded
+
     def close(self, session_id):
+        """Explicitly remove a session."""
+
         with self._lock:
             self._sessions.pop(session_id, None)
 
     def count(self):
+        """Return the number of currently active sessions."""
+
         with self._lock:
             self._prune()
             return len(self._sessions)

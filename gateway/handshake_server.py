@@ -1,10 +1,17 @@
 
-"""PQVPN lab gateway: hybrid handshake + PSK authorization + UDP sessions.
+"""PQVPN authenticated gateway handshake server.
 
-TCP listens on loopback only.
-UDP also defaults to loopback.
+Features:
+- Hybrid post-quantum + classical handshake
+- ML-DSA gateway identity authentication
+- PSK-based client authorization
+- Shared encrypted UDP session registry
+- Optional encrypted IPv4 delivery test mode
 
-No TUN routing or full VPN tunnel yet.
+IPv4 test mode does NOT enable routing, NAT or TUN forwarding.
+
+WARNING:
+This is an experimental gateway, not a production VPN service.
 """
 
 import argparse
@@ -46,10 +53,13 @@ from modules.networking.transport.session_authorization import (
 
 HOST = "0.0.0.0"
 DEFAULT_PORT = 51821
+DEFAULT_UDP_PORT = 51820
 TIMEOUT = 10
 
 
 def load_identity():
+    """Load the gateway's persistent ML-DSA identity keys."""
+
     directory = Path.home() / ".config" / "pqvpn"
 
     private_path = directory / "gateway-identity.key"
@@ -65,6 +75,7 @@ def load_identity():
             "Gateway public key missing"
         )
 
+    # Enforce private key filesystem permissions on Unix.
     if os.name != "nt":
         mode = private_path.stat().st_mode & 0o777
 
@@ -90,13 +101,18 @@ def handle_connection(
     sessions,
     psk,
 ):
+    """Perform authenticated handshake and authorize a session."""
+
     public, private = identity
 
     connection.settimeout(TIMEOUT)
 
+    # 1. Receive client handshake message.
     client_frame = receive_tcp_message(connection)
+
     client_hello = decode_client_hello(client_frame)
 
+    # 2. Perform server-side hybrid handshake.
     state, server_hello = server_respond(
         client_hello,
         public,
@@ -108,7 +124,9 @@ def handle_connection(
         encode_server_hello(server_hello),
     )
 
+    # 3. Verify client handshake confirmation.
     finished_frame = receive_tcp_message(connection)
+
     client_proof = decode_client_finished(
         finished_frame
     )
@@ -118,9 +136,7 @@ def handle_connection(
         client_proof,
     )
 
-    # Hybrid handshake complete.
-    # Now authorize the client.
-
+    # 4. Authorize client using the configured PSK.
     challenge = make_challenge()
 
     connection.sendall(challenge)
@@ -140,12 +156,14 @@ def handle_connection(
             "Client PSK authorization failed"
         )
 
+    # 5. Register an authorized encrypted UDP session.
     session_id = sessions.create(
         keys,
         "server",
         authorized=True,
     )
 
+    # 6. Return authenticated session acceptance.
     acceptance = make_accept(
         keys,
         session_id,
@@ -167,23 +185,40 @@ def handle_connection(
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    """Start TCP handshake and encrypted UDP gateway services."""
+
+    parser = argparse.ArgumentParser(
+        description="PQVPN authenticated gateway server"
+    )
 
     parser.add_argument(
         "--port",
         type=int,
         default=DEFAULT_PORT,
+        help="TCP handshake listening port",
     )
 
     parser.add_argument(
         "--udp-host",
         default="127.0.0.1",
+        help="UDP bind address",
     )
 
     parser.add_argument(
         "--udp-port",
         type=int,
-        default=51820,
+        default=DEFAULT_UDP_PORT,
+        help="Encrypted UDP listening port",
+    )
+
+    # Sprint 12C.2: explicit opt-in for IPv4 delivery testing.
+    parser.add_argument(
+        "--enable-ipv4-test",
+        action="store_true",
+        help=(
+            "Enable controlled single-client encrypted "
+            "IPv4 packet delivery without forwarding"
+        ),
     )
 
     args = parser.parse_args()
@@ -194,10 +229,14 @@ def main():
     if not 1 <= args.udp_port <= 65535:
         parser.error("Invalid UDP port")
 
+    # Load authorization and identity before opening services.
     psk = load_psk()
     identity = load_identity()
+
+    # TCP handshake and UDP gateway share this registry.
     sessions = SessionManager()
 
+    # Start encrypted UDP gateway in a background thread.
     worker = threading.Thread(
         target=serve_forever,
         args=(
@@ -205,7 +244,11 @@ def main():
             args.udp_host,
             args.udp_port,
         ),
+        kwargs={
+            "enable_ipv4_test": args.enable_ipv4_test,
+        },
         daemon=True,
+        name="pqvpn-udp-gateway",
     )
 
     worker.start()
@@ -213,8 +256,16 @@ def main():
     print(
         "Gateway fingerprint:",
         public_key_fingerprint(identity[0]),
+        flush=True,
     )
 
+    print(
+        "IPv4 delivery test:",
+        "ENABLED" if args.enable_ipv4_test else "DISABLED",
+        flush=True,
+    )
+
+    # TCP handshake server.
     with socket.socket(
         socket.AF_INET,
         socket.SOCK_STREAM,
@@ -230,8 +281,7 @@ def main():
         server.listen(5)
 
         print(
-            f"PQVPN handshake listening on "
-            f"{HOST}:{args.port}",
+            f"PQVPN handshake listening on {HOST}:{args.port}",
             flush=True,
         )
 
@@ -248,6 +298,7 @@ def main():
                     )
 
                 except Exception as exc:
+                    # Do not disclose handshake secrets or PSK data.
                     print(
                         "Handshake rejected:",
                         type(exc).__name__,
