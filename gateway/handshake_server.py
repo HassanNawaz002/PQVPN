@@ -1,8 +1,7 @@
-
 """PQVPN authenticated gateway handshake server.
 
 Hybrid PQC handshake, ML-DSA authentication, PSK authorization,
-encrypted UDP sessions and optional bidirectional ICMP TUN lab.
+encrypted UDP sessions and optional bidirectional TUN lab.
 
 Experimental software. Not a production VPN.
 """
@@ -83,11 +82,9 @@ def handle_connection(
     public, private = identity
     connection.settimeout(TIMEOUT)
 
-    # 1. Receive client hello.
     client_frame = receive_tcp_message(connection)
     client_hello = decode_client_hello(client_frame)
 
-    # 2. Perform hybrid handshake.
     state, server_hello = server_respond(
         client_hello,
         public,
@@ -99,7 +96,6 @@ def handle_connection(
         encode_server_hello(server_hello),
     )
 
-    # 3. Verify client handshake confirmation.
     finished_frame = receive_tcp_message(connection)
     client_proof = decode_client_finished(finished_frame)
 
@@ -108,7 +104,6 @@ def handle_connection(
         client_proof,
     )
 
-    # 4. Authorize client using PSK.
     challenge = make_challenge()
     connection.sendall(challenge)
 
@@ -127,14 +122,12 @@ def handle_connection(
             "Client PSK authorization failed"
         )
 
-    # 5. Register authorized session.
     session_id = sessions.create(
         keys,
         "server",
         authorized=True,
     )
 
-    # 6. Send authenticated session acceptance.
     acceptance = make_accept(
         keys,
         session_id,
@@ -189,7 +182,13 @@ def main():
     parser.add_argument(
         "--enable-tun",
         action="store_true",
-        help="Enable isolated bidirectional ICMP TUN lab mode",
+        help="Enable bidirectional TUN lab mode",
+    )
+
+    parser.add_argument(
+        "--enable-internet",
+        action="store_true",
+        help="Enable controlled public IPv4 forwarding through TUN",
     )
 
     args = parser.parse_args()
@@ -199,17 +198,23 @@ def main():
             "--enable-tun requires --enable-ipv4-test"
         )
 
+    if args.enable_internet and not (
+        args.enable_tun and args.enable_ipv4_test
+    ):
+        parser.error(
+            "--enable-internet requires "
+            "--enable-tun and --enable-ipv4-test"
+        )
+
     if not 1 <= args.port <= 65535:
         parser.error("Invalid TCP port")
 
     if not 1 <= args.udp_port <= 65535:
         parser.error("Invalid UDP port")
 
-    # Load identity and authorization before opening services.
     psk = load_psk()
     identity = load_identity()
 
-    # Shared TCP handshake / UDP session registry.
     sessions = SessionManager()
 
     worker = threading.Thread(
@@ -222,6 +227,7 @@ def main():
         kwargs={
             "enable_ipv4_test": args.enable_ipv4_test,
             "enable_tun": args.enable_tun,
+            "enable_internet": args.enable_internet,
         },
         daemon=True,
         name="pqvpn-udp-gateway",

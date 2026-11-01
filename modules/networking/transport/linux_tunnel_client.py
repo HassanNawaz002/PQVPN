@@ -1,14 +1,14 @@
-
 """PQVPN bidirectional Linux TUN client.
 
-Controlled single-client ICMP tunnel:
-10.77.0.2 <-> 10.77.0.1
+Isolated ICMP mode and opt-in public IPv4 forwarding.
 
-No default-route, DNS or firewall modifications.
+Does not modify default route, DNS or firewall.
 """
 
 import argparse
 import socket
+import ipaddress
+import subprocess
 
 from modules.networking.host.linux_tun import LinuxTunAdapter
 from modules.networking.host.packet_reader import inspect_ipv4
@@ -29,6 +29,29 @@ from modules.networking.transport.session_transport import (
 from modules.networking.transport.udp_transport import UDPTransport
 
 
+def configure_tun(name):
+    """Bring up Linux TUN without modifying default routes."""
+    for command in (
+        ["ip", "addr", "replace", "10.77.0.2/24", "dev", name],
+        ["ip", "link", "set", "dev", name, "mtu", "1200", "up"],
+    ):
+        subprocess.run(command, check=True)
+
+
+def valid_ipv4(packet):
+    if len(packet) < 20 or packet[0] >> 4 != 4:
+        return False
+
+    ihl = (packet[0] & 15) * 4
+
+    return (
+        ihl >= 20
+        and ihl <= len(packet)
+        and int.from_bytes(packet[2:4], "big") == len(packet)
+        and not (int.from_bytes(packet[6:8], "big") & 0x3FFF)
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -39,9 +62,14 @@ def main():
     parser.add_argument("--fingerprint", required=True)
     parser.add_argument("--interface", default="pqvpn0")
 
+    parser.add_argument(
+        "--enable-internet",
+        action="store_true",
+        help="Permit public IPv4 traffic; gateway must also enable it",
+    )
+
     args = parser.parse_args()
 
-    # Existing authenticated hybrid handshake.
     keys, session_id = connect_gateway(
         args.host,
         args.port,
@@ -70,6 +98,13 @@ def main():
     print("Opening Linux TUN:", args.interface, flush=True)
 
     with LinuxTunAdapter(args.interface) as tun:
+        configure_tun(tun.name)
+
+        print(
+            "TUN configured: 10.77.0.2/24 MTU 1200 UP",
+            flush=True,
+        )
+
         with UDPTransport(
             host="0.0.0.0",
             port=0,
@@ -83,11 +118,9 @@ def main():
             )
 
             while True:
-                # Read real kernel-generated outbound packets.
                 packet = tun.read_packet(timeout=0.05)
 
-                # Receive encrypted server-to-client packets
-                # on the same UDP socket used for sending.
+                # Receive encrypted server-to-client packets.
                 try:
                     kind, datagram, peer = udp.receive()
 
@@ -95,15 +128,26 @@ def main():
                         plaintext = crypto.decrypt(datagram)
                         decoded = decode_ipv4_payload(plaintext)
 
-                        if (
-                            decoded.source,
-                            decoded.destination,
-                            decoded.protocol,
-                        ) == (
-                            "10.77.0.1",
-                            "10.77.0.2",
-                            1,
-                        ):
+                        permitted = (
+                            valid_ipv4(decoded.packet)
+                            and decoded.destination == "10.77.0.2"
+                            and decoded.protocol in (1, 6, 17)
+                            and (
+                                (
+                                    args.enable_internet
+                                    and ipaddress.IPv4Address(
+                                        decoded.source
+                                    ).is_global
+                                )
+                                or (
+                                    not args.enable_internet
+                                    and decoded.source == "10.77.0.1"
+                                    and decoded.protocol == 1
+                                )
+                            )
+                        )
+
+                        if permitted:
                             tun.write_packet(decoded.packet)
                             print(
                                 "[RECEIVED] authenticated kernel reply",
@@ -114,7 +158,6 @@ def main():
                     pass
 
                 except (ValueError, TypeError, OSError):
-                    # Reject malformed or unauthenticated traffic.
                     pass
 
                 if packet is None:
@@ -126,16 +169,25 @@ def main():
                 try:
                     info = inspect_ipv4(packet)
 
-                    # Restrict to isolated lab source.
-                    if info.source != "10.77.0.2":
+                    if (
+                        info.source != "10.77.0.2"
+                        or not valid_ipv4(packet)
+                    ):
                         continue
 
-                    # Restrict to AWS gateway destination.
-                    if info.destination != "10.77.0.1":
-                        continue
+                    if args.enable_internet:
+                        if (
+                            not ipaddress.IPv4Address(
+                                info.destination
+                            ).is_global
+                            or info.protocol not in (1, 6, 17)
+                        ):
+                            continue
 
-                    # ICMP-only lab mode.
-                    if info.protocol != 1:
+                    elif (
+                        info.destination != "10.77.0.1"
+                        or info.protocol != 1
+                    ):
                         continue
 
                     payload = encode_ipv4_payload(packet)

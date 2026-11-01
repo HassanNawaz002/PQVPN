@@ -1,8 +1,7 @@
-
 """PQVPN authenticated UDP gateway.
 
-Opt-in isolated bidirectional ICMP TUN lab.
-No internet routing, NAT or DNS forwarding.
+Opt-in bidirectional TUN forwarding.
+Internet mode requires explicit enablement.
 """
 
 import contextlib
@@ -26,6 +25,7 @@ def process_one(
     *,
     enable_ipv4_test=False,
     tun=None,
+    enable_internet=False,
 ):
     """Process one authenticated UDP datagram."""
     kind, datagram, address = udp.receive()
@@ -55,7 +55,6 @@ def process_one(
             return True
 
         if tun is None:
-            # Preserve accept-only IPv4 test behavior.
             decoded = sessions.process_ipv4(
                 session_id,
                 datagram,
@@ -66,13 +65,16 @@ def process_one(
                 session_id,
                 datagram,
                 address,
+                enable_internet=enable_internet,
             )
 
             if category == "ping":
-                # Legacy PING receives no PONG in TUN lab mode.
+                response = sessions.get(
+                    session_id
+                ).transport.encrypt(b"PONG")
+                udp.send(address, TYPE_DATA, response)
                 return True
 
-            # Only authenticated and validated IPv4 is injected.
             tun.write_packet(decoded.packet)
 
         print(
@@ -88,7 +90,6 @@ def process_one(
         return False
 
     except Exception:
-        # Fail closed for unexpected invalid traffic.
         return False
 
 
@@ -99,10 +100,14 @@ def serve_forever(
     *,
     enable_ipv4_test=False,
     enable_tun=False,
+    enable_internet=False,
 ):
     """Run the encrypted UDP gateway and optional TUN loop."""
     if enable_tun and not enable_ipv4_test:
         raise ValueError("TUN requires IPv4 test mode")
+
+    if enable_internet and not enable_tun:
+        raise ValueError("Internet mode requires TUN")
 
     if enable_tun:
         from modules.networking.host.linux_tun import LinuxTunAdapter
@@ -124,8 +129,8 @@ def serve_forever(
 
             if enable_tun:
                 print(
-                    "TUN LAB MODE ENABLED — "
-                    "ICMP to 10.77.0.1 only",
+                    "TUN INTERNET MODE ENABLED" if enable_internet else
+                    "TUN LAB MODE ENABLED — ICMP to 10.77.0.1 only",
                     flush=True,
                 )
             elif enable_ipv4_test:
@@ -135,14 +140,16 @@ def serve_forever(
                 )
 
             while True:
-                # Read real packets produced by AWS Linux kernel.
                 if tun is not None:
                     packet = tun.read_packet(timeout=0)
 
                     if packet:
                         try:
                             peer, encrypted = (
-                                sessions.encrypt_tunnel_reply(packet)
+                                sessions.encrypt_tunnel_reply(
+                                    packet,
+                                    enable_internet=enable_internet,
+                                )
                             )
                             udp.send(
                                 peer,
@@ -161,13 +168,13 @@ def serve_forever(
                         ):
                             pass
 
-                # Receive authenticated client packets.
                 try:
                     process_one(
                         udp,
                         sessions,
                         enable_ipv4_test=enable_ipv4_test,
                         tun=tun,
+                        enable_internet=enable_internet,
                     )
                 except TimeoutError:
                     continue
