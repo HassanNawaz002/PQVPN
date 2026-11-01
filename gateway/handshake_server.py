@@ -1,24 +1,16 @@
 
 """PQVPN authenticated gateway handshake server.
 
-Features:
-- Hybrid post-quantum + classical handshake
-- ML-DSA gateway identity authentication
-- PSK-based client authorization
-- Shared encrypted UDP session registry
-- Optional encrypted IPv4 delivery test mode
+Hybrid PQC handshake, ML-DSA authentication, PSK authorization,
+encrypted UDP sessions and optional bidirectional ICMP TUN lab.
 
-IPv4 test mode does NOT enable routing, NAT or TUN forwarding.
-
-WARNING:
-This is an experimental gateway, not a production VPN service.
+Experimental software. Not a production VPN.
 """
 
 import argparse
 import os
 import socket
 import threading
-
 from pathlib import Path
 
 from gateway.session_manager import SessionManager
@@ -28,11 +20,7 @@ from modules.encryption.hybrid_handshake import (
     server_respond,
     server_finish,
 )
-
-from modules.encryption.ml_dsa import (
-    public_key_fingerprint,
-)
-
+from modules.encryption.ml_dsa import public_key_fingerprint
 from modules.networking.transport.handshake_framing import (
     decode_client_hello,
     decode_client_finished,
@@ -40,7 +28,6 @@ from modules.networking.transport.handshake_framing import (
     receive_tcp_message,
     send_tcp_message,
 )
-
 from modules.networking.transport.session_authorization import (
     load_psk,
     read_exact,
@@ -58,27 +45,20 @@ TIMEOUT = 10
 
 
 def load_identity():
-    """Load the gateway's persistent ML-DSA identity keys."""
-
+    """Load persistent ML-DSA gateway identity keys."""
     directory = Path.home() / ".config" / "pqvpn"
 
     private_path = directory / "gateway-identity.key"
     public_path = directory / "gateway-identity.pub"
 
     if not private_path.is_file():
-        raise RuntimeError(
-            "Gateway private key missing"
-        )
+        raise RuntimeError("Gateway private key missing")
 
     if not public_path.is_file():
-        raise RuntimeError(
-            "Gateway public key missing"
-        )
+        raise RuntimeError("Gateway public key missing")
 
-    # Enforce private key filesystem permissions on Unix.
     if os.name != "nt":
         mode = private_path.stat().st_mode & 0o777
-
         if mode & 0o077:
             raise RuntimeError(
                 "Private key permissions are too broad"
@@ -88,9 +68,7 @@ def load_identity():
     private = private_path.read_bytes()
 
     if len(public) != 1952 or len(private) != 4032:
-        raise RuntimeError(
-            "Invalid identity key lengths"
-        )
+        raise RuntimeError("Invalid identity key lengths")
 
     return public, private
 
@@ -102,17 +80,14 @@ def handle_connection(
     psk,
 ):
     """Perform authenticated handshake and authorize a session."""
-
     public, private = identity
-
     connection.settimeout(TIMEOUT)
 
-    # 1. Receive client handshake message.
+    # 1. Receive client hello.
     client_frame = receive_tcp_message(connection)
-
     client_hello = decode_client_hello(client_frame)
 
-    # 2. Perform server-side hybrid handshake.
+    # 2. Perform hybrid handshake.
     state, server_hello = server_respond(
         client_hello,
         public,
@@ -126,19 +101,15 @@ def handle_connection(
 
     # 3. Verify client handshake confirmation.
     finished_frame = receive_tcp_message(connection)
-
-    client_proof = decode_client_finished(
-        finished_frame
-    )
+    client_proof = decode_client_finished(finished_frame)
 
     keys = server_finish(
         state,
         client_proof,
     )
 
-    # 4. Authorize client using the configured PSK.
+    # 4. Authorize client using PSK.
     challenge = make_challenge()
-
     connection.sendall(challenge)
 
     authorization_proof = read_exact(
@@ -156,14 +127,14 @@ def handle_connection(
             "Client PSK authorization failed"
         )
 
-    # 5. Register an authorized encrypted UDP session.
+    # 5. Register authorized session.
     session_id = sessions.create(
         keys,
         "server",
         authorized=True,
     )
 
-    # 6. Return authenticated session acceptance.
+    # 6. Send authenticated session acceptance.
     acceptance = make_accept(
         keys,
         session_id,
@@ -173,7 +144,6 @@ def handle_connection(
 
     try:
         connection.sendall(acceptance)
-
     except OSError:
         sessions.close(session_id)
         raise
@@ -186,7 +156,6 @@ def handle_connection(
 
 def main():
     """Start TCP handshake and encrypted UDP gateway services."""
-
     parser = argparse.ArgumentParser(
         description="PQVPN authenticated gateway server"
     )
@@ -211,17 +180,24 @@ def main():
         help="Encrypted UDP listening port",
     )
 
-    # Sprint 12C.2: explicit opt-in for IPv4 delivery testing.
     parser.add_argument(
         "--enable-ipv4-test",
         action="store_true",
-        help=(
-            "Enable controlled single-client encrypted "
-            "IPv4 packet delivery without forwarding"
-        ),
+        help="Enable controlled IPv4 delivery test",
+    )
+
+    parser.add_argument(
+        "--enable-tun",
+        action="store_true",
+        help="Enable isolated bidirectional ICMP TUN lab mode",
     )
 
     args = parser.parse_args()
+
+    if args.enable_tun and not args.enable_ipv4_test:
+        parser.error(
+            "--enable-tun requires --enable-ipv4-test"
+        )
 
     if not 1 <= args.port <= 65535:
         parser.error("Invalid TCP port")
@@ -229,14 +205,13 @@ def main():
     if not 1 <= args.udp_port <= 65535:
         parser.error("Invalid UDP port")
 
-    # Load authorization and identity before opening services.
+    # Load identity and authorization before opening services.
     psk = load_psk()
     identity = load_identity()
 
-    # TCP handshake and UDP gateway share this registry.
+    # Shared TCP handshake / UDP session registry.
     sessions = SessionManager()
 
-    # Start encrypted UDP gateway in a background thread.
     worker = threading.Thread(
         target=serve_forever,
         args=(
@@ -246,6 +221,7 @@ def main():
         ),
         kwargs={
             "enable_ipv4_test": args.enable_ipv4_test,
+            "enable_tun": args.enable_tun,
         },
         daemon=True,
         name="pqvpn-udp-gateway",
@@ -265,7 +241,6 @@ def main():
         flush=True,
     )
 
-    # TCP handshake server.
     with socket.socket(
         socket.AF_INET,
         socket.SOCK_STREAM,
@@ -296,9 +271,7 @@ def main():
                         sessions,
                         psk,
                     )
-
                 except Exception as exc:
-                    # Do not disclose handshake secrets or PSK data.
                     print(
                         "Handshake rejected:",
                         type(exc).__name__,

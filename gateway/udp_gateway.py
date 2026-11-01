@@ -1,32 +1,33 @@
 
 """PQVPN authenticated UDP gateway.
 
-Supports:
-- Legacy encrypted PING/PONG
-- Opt-in authenticated IPv4 packet delivery test
-- Session validation and replay protection
-- Single-client tunnel source validation
-
-Does NOT implement TUN injection, NAT or forwarding.
+Opt-in isolated bidirectional ICMP TUN lab.
+No internet routing, NAT or DNS forwarding.
 """
 
+import contextlib
+
+from gateway.session_manager import SessionError
 from modules.networking.transport.packet_framing import TYPE_DATA
 from modules.networking.transport.udp_transport import UDPTransport
 from modules.networking.transport.ip_payload import (
-    HEADER_SIZE as IP_HEADER_SIZE,
+    HEADER_SIZE,
     MAX_IPV4_PACKET,
 )
 
 
 MAX_TEST_PAYLOAD = 1200
-
-# Includes session ID, encryption overhead and IPv4 framing.
-MAX_IP_DATAGRAM = MAX_IPV4_PACKET + IP_HEADER_SIZE + 256
+MAX_IP_DATAGRAM = MAX_IPV4_PACKET + HEADER_SIZE + 256
 
 
-def process_one(udp, sessions, *, enable_ipv4_test=False):
-    """Process one encrypted UDP datagram."""
-
+def process_one(
+    udp,
+    sessions,
+    *,
+    enable_ipv4_test=False,
+    tun=None,
+):
+    """Process one authenticated UDP datagram."""
     kind, datagram, address = udp.receive()
 
     if kind != TYPE_DATA:
@@ -43,69 +44,51 @@ def process_one(udp, sessions, *, enable_ipv4_test=False):
 
     session_id = datagram[:16]
 
-    if not enable_ipv4_test:
-        try:
+    try:
+        if not enable_ipv4_test:
             response = sessions.process_ping(
                 session_id,
                 datagram,
                 address,
             )
-
             udp.send(address, TYPE_DATA, response)
             return True
 
-        except Exception:
-            return False
-
-    # Test mode: one authenticated decrypt per datagram.
-    # Avoid decrypting the same datagram twice, because
-    # replay protection would reject the second attempt.
-    try:
-        with sessions._lock:
-            entry = sessions.get(session_id)
-
-            if len(sessions._sessions) != 1:
-                return False
-
-            if (
-                entry.peer is not None
-                and entry.peer != address
-            ):
-                return False
-
-            plaintext = entry.transport.decrypt(datagram)
-
-            if plaintext == b"PING":
-                if entry.peer is None:
-                    entry.peer = address
-
-                response = entry.transport.encrypt(b"PONG")
-                udp.send(address, TYPE_DATA, response)
-                return True
-
-            from modules.networking.transport.ip_payload import (
-                decode_ipv4_payload,
-                validate_tunnel_source,
+        if tun is None:
+            # Preserve accept-only IPv4 test behavior.
+            decoded = sessions.process_ipv4(
+                session_id,
+                datagram,
+                address,
+            )
+        else:
+            category, decoded = sessions.process_tunnel_datagram(
+                session_id,
+                datagram,
+                address,
             )
 
-            decoded = decode_ipv4_payload(plaintext)
-            validate_tunnel_source(decoded, "10.77.0.2")
+            if category == "ping":
+                # Legacy PING receives no PONG in TUN lab mode.
+                return True
 
-            if entry.peer is None:
-                entry.peer = address
+            # Only authenticated and validated IPv4 is injected.
+            tun.write_packet(decoded.packet)
 
         print(
-            "[IPv4 ACCEPTED] "
+            f"[IPv4 ACCEPTED] "
             f"{decoded.source} -> {decoded.destination} "
             f"protocol={decoded.protocol} "
             f"bytes={len(decoded.packet)}",
             flush=True,
         )
-
         return True
 
+    except (SessionError, ValueError, TypeError, OSError):
+        return False
+
     except Exception:
-        # Fail closed for invalid/unauthenticated traffic.
+        # Fail closed for unexpected invalid traffic.
         return False
 
 
@@ -115,36 +98,78 @@ def serve_forever(
     port=51820,
     *,
     enable_ipv4_test=False,
+    enable_tun=False,
 ):
-    """Run the encrypted UDP gateway."""
+    """Run the encrypted UDP gateway and optional TUN loop."""
+    if enable_tun and not enable_ipv4_test:
+        raise ValueError("TUN requires IPv4 test mode")
 
-    with UDPTransport(
-        host=host,
-        port=port,
-        timeout=2.0,
-    ) as udp:
+    if enable_tun:
+        from modules.networking.host.linux_tun import LinuxTunAdapter
+        tun_context = LinuxTunAdapter("pqvpn0")
+    else:
+        tun_context = contextlib.nullcontext(None)
 
-        print(
-            f"Encrypted UDP listening on {udp.address}",
-            flush=True,
-        )
+    with tun_context as tun:
+        with UDPTransport(
+            host=host,
+            port=port,
+            timeout=0.1 if enable_tun else 2.0,
+        ) as udp:
 
-        if enable_ipv4_test:
             print(
-                "IPv4 TEST MODE ENABLED — no forwarding",
+                f"Encrypted UDP listening on {udp.address}",
                 flush=True,
             )
 
-        while True:
-            try:
-                process_one(
-                    udp,
-                    sessions,
-                    enable_ipv4_test=enable_ipv4_test,
+            if enable_tun:
+                print(
+                    "TUN LAB MODE ENABLED — "
+                    "ICMP to 10.77.0.1 only",
+                    flush=True,
+                )
+            elif enable_ipv4_test:
+                print(
+                    "IPv4 TEST MODE ENABLED — no forwarding",
+                    flush=True,
                 )
 
-            except TimeoutError:
-                continue
+            while True:
+                # Read real packets produced by AWS Linux kernel.
+                if tun is not None:
+                    packet = tun.read_packet(timeout=0)
 
-            except OSError:
-                continue
+                    if packet:
+                        try:
+                            peer, encrypted = (
+                                sessions.encrypt_tunnel_reply(packet)
+                            )
+                            udp.send(
+                                peer,
+                                TYPE_DATA,
+                                encrypted,
+                            )
+                            print(
+                                "[TUN REPLY SENT]",
+                                flush=True,
+                            )
+                        except (
+                            SessionError,
+                            ValueError,
+                            TypeError,
+                            OSError,
+                        ):
+                            pass
+
+                # Receive authenticated client packets.
+                try:
+                    process_one(
+                        udp,
+                        sessions,
+                        enable_ipv4_test=enable_ipv4_test,
+                        tun=tun,
+                    )
+                except TimeoutError:
+                    continue
+                except OSError:
+                    continue
