@@ -1,17 +1,25 @@
 
 """PQVPN authenticated encrypted session transport.
 
-This module handles encrypted application payloads after
-a successful authenticated hybrid handshake.
+Provides session-bound AES-256-GCM packet encryption and
+decryption using existing directional crypto modules.
 
-It does not perform a handshake, authenticate a client,
-or create an operating-system VPN tunnel.
+Security properties:
+- Authenticated session binding
+- Directional encryption/decryption
+- Replay protection through PacketDecryptor
+- Session ID validation
 """
 
 import hmac
 
-from modules.encryption.packet_encryptor import PacketEncryptor
-from modules.decryption.aead_decryptor import PacketDecryptor
+from modules.encryption.packet_encryptor import (
+    PacketEncryptor,
+)
+
+from modules.decryption.aead_decryptor import (
+    PacketDecryptor,
+)
 
 
 CLIENT_TO_SERVER = 1
@@ -21,8 +29,8 @@ SESSION_ID_BYTES = 16
 SESSION_CONTEXT = b"PQVPN-v1-session-data\x00"
 
 
-class SessionTransportError(Exception):
-    """Invalid encrypted session operation."""
+class SessionTransportError(ValueError):
+    """Invalid session parameters or session-bound packet."""
 
 
 class SecureSessionTransport:
@@ -36,25 +44,24 @@ class SecureSessionTransport:
         receive_nonce_prefix,
         receive_direction,
     ):
-        if not isinstance(session_id, bytes):
+        if (
+            not isinstance(session_id, bytes)
+            or len(session_id) != SESSION_ID_BYTES
+        ):
             raise SessionTransportError(
-                "Session ID must be bytes"
+                "Session ID must be exactly 16 bytes"
             )
 
-        if len(session_id) != SESSION_ID_BYTES:
-            raise SessionTransportError(
-                "Session ID must be 16 bytes"
-            )
+        valid_directions = {
+            CLIENT_TO_SERVER,
+            SERVER_TO_CLIENT,
+        }
 
-        if send_direction == receive_direction:
-            raise SessionTransportError(
-                "Send and receive directions must differ"
-            )
-
-        if {
-            send_direction,
-            receive_direction,
-        } != {CLIENT_TO_SERVER, SERVER_TO_CLIENT}:
+        if (
+            send_direction not in valid_directions
+            or receive_direction not in valid_directions
+            or send_direction == receive_direction
+        ):
             raise SessionTransportError(
                 "Invalid session directions"
             )
@@ -75,12 +82,10 @@ class SecureSessionTransport:
 
     def encrypt(self, payload):
         if not isinstance(payload, bytes):
-            raise SessionTransportError(
+            raise TypeError(
                 "Payload must be bytes"
             )
 
-        # Bind the session identifier to the authenticated
-        # encrypted plaintext, not just the outer UDP frame.
         plaintext = (
             SESSION_CONTEXT
             + self.session_id
@@ -91,18 +96,17 @@ class SecureSessionTransport:
             plaintext
         )
 
-        # Outer session ID permits receiver-side lookup.
         return self.session_id + encrypted
 
     def decrypt(self, datagram):
         if not isinstance(datagram, bytes):
-            raise SessionTransportError(
+            raise TypeError(
                 "Datagram must be bytes"
             )
 
         if len(datagram) <= SESSION_ID_BYTES:
             raise SessionTransportError(
-                "Encrypted datagram too short"
+                "Truncated session packet"
             )
 
         received_id = datagram[:SESSION_ID_BYTES]
@@ -112,7 +116,7 @@ class SecureSessionTransport:
             self.session_id,
         ):
             raise SessionTransportError(
-                "Unknown session ID"
+                "Session ID mismatch"
             )
 
         encrypted = datagram[SESSION_ID_BYTES:]
@@ -122,12 +126,15 @@ class SecureSessionTransport:
         )
 
         expected_prefix = (
-            SESSION_CONTEXT + self.session_id
+            SESSION_CONTEXT
+            + self.session_id
         )
 
-        if not plaintext.startswith(expected_prefix):
+        if not plaintext.startswith(
+            expected_prefix
+        ):
             raise SessionTransportError(
-                "Session authentication context mismatch"
+                "Invalid authenticated session context"
             )
 
         return plaintext[len(expected_prefix):]
