@@ -44,7 +44,7 @@ from modules.networking.transport.session_authorization import (
 )
 
 
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 DEFAULT_PORT = 51821
 TIMEOUT = 10
 
