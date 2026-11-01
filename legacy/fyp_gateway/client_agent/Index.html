@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PQ Tunneling</title>
+<link rel="stylesheet" href="Styles.css" />
+</head>
+<body>
+
+  <div class="app-frame" id="appFrame">
+
+    <!-- ============ TITLE BAR ============ -->
+    <header class="titlebar" id="titlebar">
+      <div class="titlebar-brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M16 2 L28 9 V23 L16 30 L4 23 V9 Z" stroke="url(#brandGrad)" stroke-width="1.6" fill="rgba(52,229,168,0.06)"/>
+          <path d="M16 9 L22 12.5 V19.5 L16 23 L10 19.5 V12.5 Z" stroke="#29f0ff" stroke-width="1.2" fill="none"/>
+          <circle cx="16" cy="16" r="2.1" fill="#34e5a8"/>
+          <defs>
+            <linearGradient id="brandGrad" x1="4" y1="2" x2="28" y2="30" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#34e5a8"/>
+              <stop offset="1" stop-color="#29f0ff"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <span class="brand-word">PQ<span class="brand-word-accent">TUNNELING</span></span>
+        <span class="brand-tag">HYBRID PQC GATEWAY</span>
+      </div>
+
+      <nav class="titlebar-tabs" id="titlebarTabs">
+        <button class="tbtab active" data-tab="dashboard">Dashboard</button>
+        <button class="tbtab" data-tab="lattice">Lattice Monitor</button>
+        <button class="tbtab" data-tab="logs">Session Log</button>
+      </nav>
+
+      <div class="window-controls" id="windowControls">
+        <button class="wctl" id="wcMin" title="Minimize"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"/></svg></button>
+        <button class="wctl" id="wcMax" title="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"/></svg></button>
+        <button class="wctl wctl-close" id="wcClose" title="Close"><svg viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9"/><line x1="9" y1="1" x2="1" y2="9"/></svg></button>
+      </div>
+    </header>
+
+    <!-- ============ VIEW STACK ============ -->
+    <div class="view-stack" id="viewStack">
+
+    <!-- ============ DASHBOARD VIEW ============ -->
+    <div class="app-view active" id="view-dashboard" data-view="dashboard">
+    <div class="app-body">
+
+      <!-- ============ LEFT SIDEBAR ============ -->
+      <aside class="sidebar">
+
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 20 20" fill="none"><circle cx="8.5" cy="8.5" r="6" stroke="currentColor" stroke-width="1.5"/><line x1="13" y1="13" x2="18" y2="18" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <input type="text" id="searchInput" placeholder="Search location or node ID…" />
+        </div>
+
+        <div class="seg-tabs" id="segTabs">
+          <button class="seg-tab active" data-seg="recents">Recents</button>
+          <button class="seg-tab" data-seg="countries">Countries</button>
+          <button class="seg-tab" data-seg="profiles">Profiles</button>
+        </div>
+
+        <div class="filter-chips" id="filterChips">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="secure-core">Secure Core</button>
+          <button class="chip" data-filter="p2p">P2P</button>
+          <button class="chip" data-filter="tor">Tor</button>
+        </div>
+
+        <div class="country-list" id="countryList">
+          <!-- Populated by render.js -->
+        </div>
+
+        <div class="sidebar-footer">
+          <div class="pqc-meter">
+            <span class="pqc-meter-label">Key Encapsulation</span>
+            <span class="pqc-meter-value">ML-KEM-1024</span>
+          </div>
+          <div class="pqc-meter">
+            <span class="pqc-meter-label">Signature Scheme</span>
+            <span class="pqc-meter-value">ML-DSA-65</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- ============ CENTER MAP CANVAS ============ -->
+      <main class="map-stage">
+
+        <div class="fastest-card" id="fastestCard">
+          <div class="fastest-card-left">
+            <div class="fastest-icon">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M13 2 L4 14 H11 L10 22 L20 9 H13 Z" fill="#34e5a8"/></svg>
+            </div>
+            <div class="fastest-copy">
+              <div class="fastest-title" id="fastestTitle">Fastest Node — Frankfurt, DE</div>
+              <div class="fastest-sub">Best server based on your location &amp; live lattice load</div>
+            </div>
+          </div>
+          <button class="connect-btn" id="connectBtn">
+            <span class="connect-btn-dot"></span>
+            <span class="connect-btn-label" id="connectBtnLabel">Connect</span>
+          </button>
+        </div>
+
+        <div class="map-canvas" id="mapCanvas">
+          <!-- world grid + landmasses drawn via SVG -->
+          <svg class="world-svg" id="worldSvg" viewBox="0 0 1000 520" preserveAspectRatio="xMidYMid meet"></svg>
+          <!-- lattice radar signature element -->
+          <div class="lattice-radar" id="latticeRadar">
+            <svg viewBox="0 0 300 300" class="lattice-svg">
+              <defs>
+                <radialGradient id="radarGlow" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stop-color="rgba(255,61,154,0.35)"/>
+                  <stop offset="60%" stop-color="rgba(41,240,255,0.08)"/>
+                  <stop offset="100%" stop-color="rgba(41,240,255,0)"/>
+                </radialGradient>
+              </defs>
+              <circle cx="150" cy="150" r="140" fill="url(#radarGlow)"/>
+              <g id="latticeRings" class="lattice-rings"></g>
+              <g id="latticeHex" class="lattice-hex"></g>
+              <circle cx="150" cy="150" r="4.5" fill="#ff3d9a" class="anchor-dot"/>
+              <circle cx="150" cy="150" r="9" fill="none" stroke="#ff3d9a" stroke-width="1" opacity="0.6" class="anchor-ring"/>
+            </svg>
+          </div>
+          <div class="map-legend">
+            <span class="legend-dot legend-dot--online"></span> Active node
+            <span class="legend-dot legend-dot--selected"></span> Selected anchor
+          </div>
+        </div>
+      </main>
+
+      <!-- ============ RIGHT UTILITY DOCK ============ -->
+      <aside class="util-dock">
+        <div class="util-tile" data-util="netshield">
+          <div class="util-icon">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M12 2 L21 6 V12 C21 17 17 20.5 12 22 C7 20.5 3 17 3 12 V6 Z" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12 L11 14.5 L16 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="util-copy">
+            <div class="util-title">NetShield</div>
+            <div class="util-sub" id="netshieldSub">Blocking ads &amp; trackers</div>
+          </div>
+          <button class="toggle on" data-toggle="netshield"><span class="toggle-knob"></span></button>
+        </div>
+
+        <div class="util-tile" data-util="killswitch">
+          <div class="util-icon">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M12 2 V12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M7 5.5 C4.8 7.2 3.5 9.7 3.5 12.5 C3.5 17.2 7.3 21 12 21 C16.7 21 20.5 17.2 20.5 12.5 C20.5 9.7 19.2 7.2 17 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </div>
+          <div class="util-copy">
+            <div class="util-title">Kill Switch</div>
+            <div class="util-sub" id="killswitchSub">Blocks traffic if tunnel drops</div>
+          </div>
+          <button class="toggle on" data-toggle="killswitch"><span class="toggle-knob"></span></button>
+        </div>
+
+        <div class="util-tile" data-util="portforward">
+          <div class="util-icon">
+            <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="7" width="7" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M10 12 H14" stroke="currentColor" stroke-width="1.5"/></svg>
+          </div>
+          <div class="util-copy">
+            <div class="util-title">Port Forwarding</div>
+            <div class="util-sub" id="portforwardSub">Not configured</div>
+          </div>
+          <button class="toggle" data-toggle="portforward"><span class="toggle-knob"></span></button>
+        </div>
+
+        <div class="util-tile" data-util="splittunnel">
+          <div class="util-icon">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M4 6 H10 L13 12 L10 18 H4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13 12 H20" stroke="currentColor" stroke-width="1.5"/><path d="M16 8 L20 12 L16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="util-copy">
+            <div class="util-title">Split Tunneling</div>
+            <div class="util-sub" id="splittunnelSub">3 apps routed outside tunnel</div>
+          </div>
+          <button class="toggle on" data-toggle="splittunnel"><span class="toggle-knob"></span></button>
+        </div>
+
+        <div class="util-tile util-tile--settings" data-util="settings">
+          <div class="util-icon">
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M19.4 13a7.9 7.9 0 0 0 0-2l2-1.5-2-3.4-2.3.9a8 8 0 0 0-1.7-1L15 3.5h-4l-.4 2.5a8 8 0 0 0-1.7 1l-2.3-.9-2 3.4L6.6 11a7.9 7.9 0 0 0 0 2l-2 1.5 2 3.4 2.3-.9a8 8 0 0 0 1.7 1L10 20.5h4l.4-2.5a8 8 0 0 0 1.7-1l2.3.9 2-3.4Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="util-copy">
+            <div class="util-title">Settings</div>
+            <div class="util-sub">Gateway configuration</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+    </div>
+    <!-- /view-dashboard -->
+
+    <!-- ============ LATTICE MONITOR VIEW ============ -->
+    <div class="app-view" id="view-lattice" data-view="lattice">
+      <div class="panel-scroll">
+        <div class="panel-header">
+          <h2>Lattice Monitor</h2>
+          <p>Live diagnostics for the ML-KEM-1024 / ML-DSA-65 lattice subsystem</p>
+        </div>
+
+        <div class="stat-grid" id="latticeStatGrid">
+          <div class="stat-card">
+            <span class="stat-label">KEM Encapsulations</span>
+            <span class="stat-value" id="statKemOps">0</span>
+            <span class="stat-caption">operations this session</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Lattice Dimension</span>
+            <span class="stat-value">1024</span>
+            <span class="stat-caption">module rank k = 4 (ML-KEM-1024)</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Signature Verifications</span>
+            <span class="stat-value" id="statSigOps">0</span>
+            <span class="stat-caption">ML-DSA-65 checks this session</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Handshake Count</span>
+            <span class="stat-value" id="statHandshakes">0</span>
+            <span class="stat-caption">hybrid X25519 + ML-KEM handshakes</span>
+          </div>
+        </div>
+
+        <div class="panel-subhead">Noise Budget (mock telemetry)</div>
+        <canvas id="noiseChart" width="900" height="120"></canvas>
+
+        <div class="panel-subhead">Last Handshake</div>
+        <div class="kv-table" id="lastHandshakeTable">
+          <div class="kv-row"><span class="kv-key">Status</span><span class="kv-val" id="lhStatus">No handshake yet</span></div>
+          <div class="kv-row"><span class="kv-key">KEM</span><span class="kv-val">ML-KEM-1024</span></div>
+          <div class="kv-row"><span class="kv-key">Classical Hybrid</span><span class="kv-val">X25519</span></div>
+          <div class="kv-row"><span class="kv-key">KDF</span><span class="kv-val">HKDF-SHA-256</span></div>
+          <div class="kv-row"><span class="kv-key">AEAD</span><span class="kv-val">AES-GCM-256</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ SESSION LOG VIEW ============ -->
+    <div class="app-view" id="view-logs" data-view="logs">
+      <div class="panel-scroll">
+        <div class="panel-header">
+          <h2>Session Log</h2>
+          <p>Local event trace for this session — nothing here is transmitted</p>
+        </div>
+        <div class="log-toolbar">
+          <span class="log-count" id="logCount">0 events</span>
+          <button class="log-clear-btn" id="logClearBtn">Clear log</button>
+        </div>
+        <div class="log-console" id="logConsole"></div>
+      </div>
+    </div>
+
+    <!-- ============ SETTINGS VIEW ============ -->
+    <div class="app-view" id="view-settings" data-view="settings">
+      <div class="panel-scroll">
+        <div class="panel-header">
+          <h2>Settings</h2>
+          <p>Gateway configuration</p>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-title">Auto-connect on launch</div>
+              <div class="settings-row-sub">Establish the tunnel automatically when PQ Tunneling starts</div>
+            </div>
+            <button class="toggle" data-setting="autoconnect"><span class="toggle-knob"></span></button>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-title">Start with system</div>
+              <div class="settings-row-sub">Launch PQ Tunneling on boot</div>
+            </div>
+            <button class="toggle on" data-setting="startonboot"><span class="toggle-knob"></span></button>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-title">Prefer hybrid PQC handshake</div>
+              <div class="settings-row-sub">Fall back to classical X25519-only if a peer can't negotiate ML-KEM</div>
+            </div>
+            <button class="toggle on" data-setting="preferhybrid"><span class="toggle-knob"></span></button>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-title">Verbose session logging</div>
+              <div class="settings-row-sub">Record handshake and toggle events to the Session Log</div>
+            </div>
+            <button class="toggle on" data-setting="verboselog"><span class="toggle-knob"></span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    </div>
+    <!-- /view-stack -->
+
+    <!-- ============ FOOTER DIAGNOSTIC SHELF ============ -->
+    <footer class="status-shelf" id="statusShelf">
+      <div class="status-block status-block--primary">
+        <span class="status-shield" id="statusShield">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 2 L21 6 V12 C21 17 17 20.5 12 22 C7 20.5 3 17 3 12 V6 Z" stroke="currentColor" stroke-width="1.6"/></svg>
+        </span>
+        <div class="status-text-group">
+          <span class="status-label" id="statusLabel">UNPROTECTED</span>
+          <span class="status-caption" id="statusCaption">Traffic is not passing through the PQ tunnel</span>
+        </div>
+      </div>
+
+      <div class="status-divider"></div>
+
+      <div class="status-meta">
+        <div class="meta-item">
+          <span class="meta-key">Your IP</span>
+          <span class="meta-val" id="metaLocalIp">203.215.174.9</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-key">Target Virtual IP</span>
+          <span class="meta-val" id="metaVirtualIp">—</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-key">Encryption</span>
+          <span class="meta-val" id="metaEncryption">Inactive</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-key">Latency</span>
+          <span class="meta-val" id="metaLatency">—</span>
+        </div>
+      </div>
+
+      <div class="status-divider"></div>
+
+      <div class="status-throughput">
+        <div class="throughput-labels">
+          <span><svg class="thr-arrow" viewBox="0 0 10 10"><path d="M5 8 V2 M2 5 L5 2 L8 5" stroke="currentColor" stroke-width="1.3" fill="none"/></svg><span id="throughputUp">0.0 KB/s</span></span>
+          <span><svg class="thr-arrow thr-arrow--down" viewBox="0 0 10 10"><path d="M5 2 V8 M2 5 L5 8 L8 5" stroke="currentColor" stroke-width="1.3" fill="none"/></svg><span id="throughputDown">0.0 KB/s</span></span>
+        </div>
+        <canvas id="sparkline" width="220" height="40"></canvas>
+      </div>
+    </footer>
+
+  </div>
+
+<script src="Render.js"></script>
+</body>
+</html>

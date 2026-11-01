@@ -1,0 +1,31 @@
+{
+  "project": "PQVPN",
+  "reported_baseline_percent": 40,
+  "target_milestone_percent": 70,
+  "milestone_70_verified": false,
+  "current_status": "Modular scaffold, not functional VPN",
+  "supported_client_targets": [
+    "Windows",
+    "Linux"
+  ],
+  "gateway_target": "Linux VPS",
+  "admin_policy": "local-only",
+  "cryptography": {
+    "pqc_kem": "ML-KEM-1024 (Kyber standardized)",
+    "pqc_signature": "ML-DSA-65 (Dilithium standardized)",
+    "classical_primary": "X25519 ECDH",
+    "classical_optional": "FFDHE",
+    "data_ciphers": [
+      "AES-256-GCM",
+      "ChaCha20-Poly1305"
+    ]
+  },
+  "release_gate": [
+    "Authenticated hybrid handshake with negative tests",
+    "AEAD packet transport and replay rejection",
+    "Windows Wintun and Linux TUN packet flow",
+    "VPS egress public IP verification",
+    "Cross-platform GUI lifecycle integration",
+    "No simulated connected state"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "pq-tunnel-client",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^43.1.0"
+  }
+}
