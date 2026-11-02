@@ -1,4 +1,3 @@
-
 """PQVPN Linux TUN adapter.
 
 Layer-3 packet I/O only. Does not modify routes, DNS, NAT or firewall.

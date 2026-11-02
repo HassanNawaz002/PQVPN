@@ -1,5 +1,13 @@
 
-"""PQVPN lab client: gateway-pinned hybrid handshake + PSK authorization."""
+"""PQVPN lab client: pinned hybrid handshake and PSK authorization.
+
+Supports:
+- Legacy single-client PSK handshake (existing lab mode).
+- Experimental identity-bound multi-client handshake.
+
+Multi-client mode requires a matching gateway implementation.
+Do not use this experimental protocol as a production VPN.
+"""
 
 import argparse
 import socket
@@ -26,30 +34,79 @@ from modules.networking.transport.session_authorization import (
     ACCEPT_SIZE,
 )
 
+from modules.networking.transport.client_identity_auth import (
+    make_identity_proof,
+    validate_client_id,
+)
 
-def connect_gateway(host, port, fingerprint):
+from modules.networking.transport.client_identity_framing import (
+    send_identity_preface,
+)
+
+
+DEFAULT_PORT = 51821
+CONNECTION_TIMEOUT = 10
+
+
+def validate_fingerprint(fingerprint):
+    """Validate the pinned gateway public-key fingerprint."""
     if (
         not isinstance(fingerprint, str)
         or len(fingerprint) != 64
         or any(
-            c not in "0123456789abcdefABCDEF"
-            for c in fingerprint
+            character not in "0123456789abcdefABCDEF"
+            for character in fingerprint
         )
     ):
-        raise ValueError(
-            "Invalid gateway fingerprint"
-        )
+        raise ValueError("Invalid gateway fingerprint")
 
+    return fingerprint
+
+
+def connect_gateway(
+    host,
+    port,
+    fingerprint,
+    *,
+    client_id=None,
+):
+    """Establish an authenticated PQVPN session.
+
+    When client_id is None, use the existing legacy protocol.
+
+    When client_id is supplied:
+      1. Send identity preface.
+      2. Perform the existing authenticated hybrid handshake.
+      3. Create an identity-bound PSK authorization proof.
+      4. Verify the gateway's authenticated acceptance.
+
+    The gateway must implement the matching multi-client mode.
+    """
+
+    validate_fingerprint(fingerprint)
+
+    if client_id is not None:
+        validate_client_id(client_id)
+
+    # Never transmit the raw PSK.
     psk = load_psk()
 
     state, hello = client_start()
 
     with socket.create_connection(
         (host, port),
-        timeout=10,
+        timeout=CONNECTION_TIMEOUT,
     ) as connection:
 
-        connection.settimeout(10)
+        connection.settimeout(CONNECTION_TIMEOUT)
+
+        # Explicit protocol selection before the hybrid handshake.
+        # Legacy clients omit this preface.
+        if client_id is not None:
+            send_identity_preface(
+                connection,
+                client_id,
+            )
 
         send_tcp_message(
             connection,
@@ -64,7 +121,7 @@ def connect_gateway(host, port, fingerprint):
             server_frame
         )
 
-        keys, proof = client_finish(
+        keys, handshake_proof = client_finish(
             state,
             response,
             fingerprint,
@@ -72,7 +129,7 @@ def connect_gateway(host, port, fingerprint):
 
         send_tcp_message(
             connection,
-            encode_client_finished(proof),
+            encode_client_finished(handshake_proof),
         )
 
         challenge = read_exact(
@@ -80,11 +137,19 @@ def connect_gateway(host, port, fingerprint):
             CHALLENGE_SIZE,
         )
 
-        authorization_proof = make_proof(
-            psk,
-            challenge,
-            keys,
-        )
+        if client_id is None:
+            authorization_proof = make_proof(
+                psk,
+                challenge,
+                keys,
+            )
+        else:
+            authorization_proof = make_identity_proof(
+                client_id,
+                psk,
+                challenge,
+                keys,
+            )
 
         connection.sendall(
             authorization_proof
@@ -106,7 +171,9 @@ def connect_gateway(host, port, fingerprint):
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="PQVPN authenticated handshake client"
+    )
 
     parser.add_argument(
         "--host",
@@ -116,7 +183,7 @@ def main():
     parser.add_argument(
         "--port",
         type=int,
-        default=51821,
+        default=DEFAULT_PORT,
     )
 
     parser.add_argument(
@@ -124,12 +191,25 @@ def main():
         required=True,
     )
 
+    parser.add_argument(
+        "--client-id",
+        default=None,
+        help=(
+            "Enable experimental identity-bound "
+            "multi-client authentication"
+        ),
+    )
+
     args = parser.parse_args()
+
+    if not 1 <= args.port <= 65535:
+        parser.error("Invalid TCP port")
 
     _keys, session_id = connect_gateway(
         args.host,
         args.port,
         args.fingerprint,
+        client_id=args.client_id,
     )
 
     print(
@@ -137,6 +217,12 @@ def main():
         "client PSK accepted; "
         "session confirmed."
     )
+
+    if args.client_id is not None:
+        print(
+            "Authenticated client identity:",
+            args.client_id,
+        )
 
     print(
         "Session ID:",

@@ -1,14 +1,23 @@
 
 """PQVPN multi-client credential registry.
 
-Stores independent client PSKs and authorization state.
-Experimental in-memory registry; network authentication
-must use challenge-response, never transmit raw PSKs.
+Independent in-memory PSKs with revocation support.
+
+Raw PSKs are never sent over the network. Network authorization
+uses an identity-bound HMAC-SHA384 challenge-response proof.
+
+Experimental implementation; not a production credential store.
 """
 
 import hmac
 import threading
 from dataclasses import dataclass
+
+from modules.networking.transport.client_identity_auth import (
+    validate_client_id,
+    verify_identity_proof,
+    ClientIdentityAuthError,
+)
 
 
 PSK_SIZE = 32
@@ -27,19 +36,19 @@ class ClientCredential:
 
 
 class ClientCredentialRegistry:
-    """Thread-safe in-memory client credential registry."""
+    """Thread-safe in-memory credential registry."""
 
     def __init__(self):
         self._lock = threading.RLock()
         self._clients = {}
 
     def add_client(self, client_id, psk):
-        if (
-            not isinstance(client_id, str)
-            or not client_id
-            or len(client_id) > 64
-        ):
-            raise CredentialError("Invalid client ID")
+        try:
+            validate_client_id(client_id)
+        except ClientIdentityAuthError as exc:
+            raise CredentialError(
+                "Invalid client ID"
+            ) from exc
 
         if not isinstance(psk, bytes) or len(psk) != PSK_SIZE:
             raise CredentialError(
@@ -63,7 +72,10 @@ class ClientCredentialRegistry:
             )
 
     def verify(self, client_id, candidate_psk):
-        """Verify a locally supplied credential."""
+        """Verify a locally supplied credential.
+
+        Not intended as a network protocol operation.
+        """
         if (
             not isinstance(client_id, str)
             or not isinstance(candidate_psk, bytes)
@@ -80,6 +92,35 @@ class ClientCredentialRegistry:
             return hmac.compare_digest(
                 record.psk,
                 candidate_psk,
+            )
+
+    def verify_proof(
+        self,
+        client_id,
+        challenge,
+        keys,
+        received_proof,
+    ):
+        """Authorize an identity-bound network proof.
+
+        The stored PSK remains internal to this registry.
+        Unknown and revoked identities fail closed.
+        """
+        if not isinstance(client_id, str):
+            return False
+
+        with self._lock:
+            record = self._clients.get(client_id)
+
+            if record is None or not record.enabled:
+                return False
+
+            return verify_identity_proof(
+                client_id,
+                record.psk,
+                challenge,
+                keys,
+                received_proof,
             )
 
     def revoke(self, client_id):
