@@ -1,6 +1,7 @@
+
 """PQVPN bidirectional Linux TUN client.
 
-Isolated ICMP mode and opt-in public IPv4 forwarding.
+Opt-in public IPv4 forwarding with authenticated session rekey.
 
 Does not modify default route, DNS or firewall.
 """
@@ -9,11 +10,15 @@ import argparse
 import socket
 import ipaddress
 import subprocess
+import time
 
 from modules.networking.host.linux_tun import LinuxTunAdapter
 from modules.networking.host.packet_reader import inspect_ipv4
-from modules.networking.transport.handshake_client import (
-    connect_gateway,
+from modules.networking.transport.client_rekey import (
+    establish_session,
+    rekey_session,
+    RekeyError,
+    REKEY_INTERVAL,
 )
 from modules.networking.transport.ip_payload import (
     encode_ipv4_payload,
@@ -21,11 +26,6 @@ from modules.networking.transport.ip_payload import (
     MAX_IPV4_PACKET,
 )
 from modules.networking.transport.packet_framing import TYPE_DATA
-from modules.networking.transport.session_transport import (
-    SecureSessionTransport,
-    CLIENT_TO_SERVER,
-    SERVER_TO_CLIENT,
-)
 from modules.networking.transport.udp_transport import UDPTransport
 
 
@@ -65,30 +65,20 @@ def main():
     parser.add_argument(
         "--enable-internet",
         action="store_true",
-        help="Permit public IPv4 traffic; gateway must also enable it",
+        help="Permit public IPv4 traffic",
     )
 
     args = parser.parse_args()
 
-    keys, session_id = connect_gateway(
-        args.host,
-        args.port,
-        args.fingerprint,
-    )
-
-    crypto = SecureSessionTransport(
-        session_id,
-        keys.client_to_server_key,
-        keys.client_nonce_prefix,
-        CLIENT_TO_SERVER,
-        keys.server_to_client_key,
-        keys.server_nonce_prefix,
-        SERVER_TO_CLIENT,
-    )
-
     destination = (
         socket.gethostbyname(args.udp_host),
         args.udp_port,
+    )
+
+    session = establish_session(
+        args.host,
+        args.port,
+        args.fingerprint,
     )
 
     print(
@@ -113,11 +103,45 @@ def main():
 
             print("TUN capture active", flush=True)
             print(
-                "Waiting for real IPv4 packets...",
+                f"Automatic rekey interval: {REKEY_INTERVAL}s",
                 flush=True,
             )
 
             while True:
+                # Rekey before gateway session expiry.
+                if (
+                    time.monotonic() - session.created_at
+                    >= REKEY_INTERVAL
+                ):
+                    print(
+                        "[REKEY] Starting authenticated renewal",
+                        flush=True,
+                    )
+
+                    try:
+                        session = rekey_session(
+                            session,
+                            udp,
+                            destination,
+                            args.host,
+                            args.port,
+                            args.fingerprint,
+                        )
+
+                    except RekeyError as exc:
+                        print(
+                            f"[REKEY FAILED] {exc}",
+                            flush=True,
+                        )
+                        raise SystemExit(
+                            "PQVPN stopped: session renewal failed"
+                        )
+
+                    print(
+                        "[REKEY] New session activated",
+                        flush=True,
+                    )
+
                 packet = tun.read_packet(timeout=0.05)
 
                 # Receive encrypted server-to-client packets.
@@ -125,7 +149,10 @@ def main():
                     kind, datagram, peer = udp.receive()
 
                     if kind == TYPE_DATA and peer == destination:
-                        plaintext = crypto.decrypt(datagram)
+                        plaintext = session.crypto.decrypt(
+                            datagram
+                        )
+
                         decoded = decode_ipv4_payload(plaintext)
 
                         permitted = (
@@ -149,6 +176,7 @@ def main():
 
                         if permitted:
                             tun.write_packet(decoded.packet)
+
                             print(
                                 "[RECEIVED] authenticated kernel reply",
                                 flush=True,
@@ -191,7 +219,10 @@ def main():
                         continue
 
                     payload = encode_ipv4_payload(packet)
-                    encrypted = crypto.encrypt(payload)
+
+                    encrypted = session.crypto.encrypt(
+                        payload
+                    )
 
                     udp.send(
                         destination,
