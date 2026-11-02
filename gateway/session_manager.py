@@ -270,9 +270,9 @@ class SessionManager:
         with self._lock:
             entry = self.get(session_id)
 
-            if len(self._sessions) != 1:
+            if session_id != self._active_session_id:
                 raise SessionError(
-                    "Tunnel requires exactly one active session"
+                    "Tunnel packet from inactive session"
                 )
 
             self._check_peer(entry, address)
@@ -327,12 +327,12 @@ class SessionManager:
         with self._lock:
             self._prune()
 
-            if len(self._sessions) != 1:
+            if self._active_session_id is None:
                 raise SessionError(
-                    "Ambiguous or expired tunnel session"
+                    "No active tunnel session"
                 )
 
-            entry = next(iter(self._sessions.values()))
+            entry = self._sessions[self._active_session_id]
 
             if entry.peer is None:
                 raise SessionError("No bound client endpoint")
