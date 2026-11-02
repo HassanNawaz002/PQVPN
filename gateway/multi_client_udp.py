@@ -158,7 +158,15 @@ class MultiClientUDPEngine:
                 entry.peer = address
 
             return entry.transport.encrypt(b"PONG")
+    
 
+    def discard_session(self, session_id):
+        """Remove UDP state after failed TCP acceptance.
+
+        Ownership registry rollback is handled by the TCP server.
+        """
+        with self._lock:
+            return self._entries.pop(session_id, None) is not None
     def revoke_client(self, client_id):
         """Retire all control-plane and UDP state for one client."""
         with self._lock:

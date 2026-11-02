@@ -1,10 +1,10 @@
 
-"""PQVPN isolated multi-client TCP handshake server.
+"""PQVPN experimental multi-client TCP authentication server.
 
-Authenticates independent client identities and issues
-authenticated session acceptances.
+Integrates authenticated TCP sessions with the isolated
+multi-client UDP engine.
 
-Control-plane testing only. No UDP/TUN forwarding.
+No TUN forwarding or production deployment is enabled.
 """
 
 import argparse
@@ -16,7 +16,11 @@ from gateway.client_authorization import ClientAuthorizationService
 from gateway.client_config import load_client_config
 from gateway.handshake_server import load_identity
 from gateway.multi_client_handshake import authenticate_connection
-from gateway.multi_client_registry import MultiClientSessionManager
+from gateway.multi_client_registry import (
+    MultiClientSessionManager,
+    MultiClientError,
+)
+from gateway.multi_client_udp import MultiClientUDPEngine
 
 from modules.networking.transport.session_authorization import (
     make_accept,
@@ -24,17 +28,20 @@ from modules.networking.transport.session_authorization import (
 
 
 class MultiClientTCPError(Exception):
-    """Multi-client TCP session establishment failed."""
+    """TCP session establishment failed."""
 
 
 class MultiClientTCPServer:
+
     def __init__(self, identity, credentials, assignments):
         self.identity = identity
         self.credentials = credentials
         self.authorization = ClientAuthorizationService(credentials)
+
         self.sessions = MultiClientSessionManager()
+        self.udp_engine = MultiClientUDPEngine(self.sessions)
+
         self._lock = threading.RLock()
-        self._pending = set()
 
         if not isinstance(assignments, dict) or not assignments:
             raise MultiClientTCPError("Client assignments required")
@@ -44,15 +51,23 @@ class MultiClientTCPServer:
                 raise MultiClientTCPError(
                     "Assignment references unknown or disabled client"
                 )
+
             self.sessions.register_client(client_id, tunnel_ip)
 
+    def _new_session_id(self):
+        """Allocate an unused session ID under the server lock."""
+        for _ in range(32):
+            sid = secrets.token_bytes(16)
+
+            try:
+                self.sessions.owner_of_session(sid)
+            except MultiClientError:
+                return sid
+
+        raise MultiClientTCPError("Unable to allocate session ID")
+
     def handle_connection(self, connection):
-        """Authenticate and register one TCP session.
-
-        Session acceptance is sent only after successful
-        authorization and ownership registration.
-        """
-
+        """Authenticate TCP and register an encrypted UDP session."""
         authenticated = authenticate_connection(
             connection,
             self.identity,
@@ -62,25 +77,12 @@ class MultiClientTCPServer:
         client_id = authenticated.client_id
         keys = authenticated.keys
 
-        # Recheck authorization before registration.
         with self._lock:
             if not self.credentials.is_enabled(client_id):
                 raise MultiClientTCPError("Client disabled")
 
-            session_id = secrets.token_bytes(16)
+            session_id = self._new_session_id()
 
-            while (
-                session_id in self._pending
-                or self._session_exists(session_id)
-            ):
-                session_id = secrets.token_bytes(16)
-
-            self._pending.add(session_id)
-
-        try:
-            # The authorization challenge and proof must be
-            # preserved from the handshake for make_accept().
-            # They are returned by the updated handshake handler.
             acceptance = make_accept(
                 keys,
                 session_id,
@@ -88,38 +90,34 @@ class MultiClientTCPServer:
                 authenticated.authorization_proof,
             )
 
-            with self._lock:
+            self.sessions.register_session(client_id, session_id)
+
+            try:
+                # Only authenticated TCP-derived keys are registered.
+                self.udp_engine.register_authenticated(
+                    client_id,
+                    session_id,
+                    keys,
+                )
+
                 if not self.credentials.is_enabled(client_id):
                     raise MultiClientTCPError("Client disabled")
 
-                self.sessions.register_session(
-                    client_id,
-                    session_id,
-                )
-
-            try:
                 connection.sendall(acceptance)
-            except OSError:
-                # Do not claim the session was accepted.
-                # The registry currently lacks removal API;
-                # no UDP transport is attached in this sprint.
+
+            except BaseException:
+                # Roll back both ownership and UDP transport state.
+                self.sessions.remove_session(client_id, session_id)
+                self.udp_engine.discard_session(session_id)
                 raise
 
             return client_id, session_id
 
-        finally:
-            with self._lock:
-                self._pending.discard(session_id)
-
-    def _session_exists(self, session_id):
-        try:
-            self.sessions.owner_of_session(session_id)
-            return True
-        except Exception as exc:
-            from gateway.multi_client_registry import MultiClientError
-            if isinstance(exc, MultiClientError):
-                return False
-            raise
+    def revoke_client(self, client_id):
+        """Revoke credentials and all associated UDP sessions."""
+        with self._lock:
+            self.credentials.revoke(client_id)
+            return self.udp_engine.revoke_client(client_id)
 
 
 def serve(host, port, server):
@@ -133,7 +131,7 @@ def serve(host, port, server):
         listener.listen(16)
 
         print(
-            f"Multi-client TCP handshake listening on {host}:{port}",
+            f"PQVPN multi-client TCP listening on {host}:{port}",
             flush=True,
         )
 
@@ -181,11 +179,11 @@ def main():
 
     assignments = {}
 
-    for assignment in args.assign:
-        if "=" not in assignment:
+    for item in args.assign:
+        if "=" not in item:
             parser.error("Invalid client assignment")
 
-        client_id, tunnel_ip = assignment.split("=", 1)
+        client_id, tunnel_ip = item.split("=", 1)
 
         if client_id in assignments:
             parser.error("Duplicate client assignment")
