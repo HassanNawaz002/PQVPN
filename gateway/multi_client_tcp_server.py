@@ -15,6 +15,7 @@ import threading
 from gateway.client_authorization import ClientAuthorizationService
 from gateway.client_config import load_client_config
 from gateway.handshake_server import load_identity
+from gateway.multi_client_ipv4_udp import MultiClientIPv4UDPEngine
 from gateway.multi_client_handshake import authenticate_connection
 from gateway.multi_client_registry import (
     MultiClientSessionManager,
@@ -39,7 +40,7 @@ class MultiClientTCPServer:
         self.authorization = ClientAuthorizationService(credentials)
 
         self.sessions = MultiClientSessionManager()
-        self.udp_engine = MultiClientUDPEngine(self.sessions)
+        self.udp_engine = MultiClientIPv4UDPEngine(self.sessions)
 
         self._lock = threading.RLock()
 
