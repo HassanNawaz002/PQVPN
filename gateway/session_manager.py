@@ -87,6 +87,7 @@ class SessionManager:
     def __init__(self):
         self._sessions = {}
         self._lock = threading.RLock()
+        self._active_session_id = None
 
     def _prune(self):
         """Remove expired sessions. Caller must hold the lock."""
@@ -94,6 +95,9 @@ class SessionManager:
         for sid in list(self._sessions):
             if self._sessions[sid].expires_at <= now:
                 del self._sessions[sid]
+
+        if self._active_session_id not in self._sessions:
+            self._active_session_id = None
 
     def register(
         self,
@@ -152,6 +156,9 @@ class SessionManager:
                 expires_at=time.monotonic() + SESSION_LIFETIME,
             )
 
+            if self._active_session_id is None:
+                self._active_session_id = session_id
+
     def create(self, keys, role, *, authorized=False):
         if not authorized:
             raise SessionError(
@@ -175,6 +182,24 @@ class SessionManager:
                 authorized=True,
             )
             return session_id
+
+    def active_session_id(self):
+        """Return the active, unexpired session ID."""
+        with self._lock:
+            self._prune()
+            return self._active_session_id
+
+    def activate(self, session_id):
+        """Atomically select a staged session and retire others."""
+        with self._lock:
+            self._prune()
+
+            if session_id not in self._sessions:
+                raise SessionError("Unknown or expired session")
+
+            selected = self._sessions[session_id]
+            self._sessions = {session_id: selected}
+            self._active_session_id = session_id
 
     def get(self, session_id):
         with self._lock:
@@ -320,6 +345,9 @@ class SessionManager:
     def close(self, session_id):
         with self._lock:
             self._sessions.pop(session_id, None)
+
+            if self._active_session_id == session_id:
+                self._active_session_id = None
 
     def count(self):
         with self._lock:
